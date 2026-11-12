@@ -1,0 +1,16 @@
+name: Build and test
+on: [push, pull_request]
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Compile with warnings as errors
+        run: gcc -std=c11 -Wall -Wextra -Werror -o mips mips.c
+      - name: Exercise CLI and hazard handling
+        run: python3 -m unittest discover -s tests -v
+      - name: Run bundled traces
+        run: |
+          ./mips 0 0 trace1.txt > /dev/null
+          ./mips 1 1 trace2.txt > /dev/null
+

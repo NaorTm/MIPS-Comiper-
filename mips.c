@@ -54,6 +54,8 @@ Control bControl = { 0,0,1,0,1,0,0,0,0 };
 Control iControl = { 0,0,0,1,0,0,0,1,0 };
 Control stallControl = { 0,0,0,0,0,0,0,0,0 };
 float cycle = 0, stalls = 0;
+int instructions = 0;
+int parseError = 0;
 
 /*Managing functions*/
 void nextCycle(FILE* traceFile, Pipeline* pipe);	//pipe[0]=pipe[1] in the end NEXT CLOCK CYCLE
@@ -64,7 +66,7 @@ void printCPI();							//print CPI
 void printfCycleInfo(Pipeline pipe);		//print current cycle pipeline stages and count stalls
 void initPipe(Pipeline* pipe);				//initiate pipe to 'no commands'
 int convertToBinary(int origin);			//convert given value to binary
-void bStall(Pipeline* pipe, int location);	//pipe[location] will be stalled
+void bStall(Pipeline* pipe);	//pipe[location] will be stalled
 void flush(Pipeline* pipe);					//flush for forward=0
 void flush1(Pipeline* pipe);				//flush for forward=1
 void endFile(Pipeline* pipe);				//close file - add 4 nops
@@ -74,55 +76,51 @@ Command readCommand(FILE* filePtr);			//read a command line
 Command endOfFile();						//nop command generate
 
 //The main.
-void main(int argc, char* argv[])
+int main(int argc, char* argv[])
 {
-	int option;
-	Pipeline pipe;
-	initPipe(&pipe);
-	printf("Enter 1 for trace1.txt, 2 for trace2.txt\n");
-	scanf("%d", &option);
-	fseek(stdin, 0, SEEK_SET);
-	switch (option)
-	{
-	case 1:
-	{
-		FILE* traceFile = fopen("trace1.txt", "r");
-		break;
-	}
-	case 2:
-	{
-		FILE* traceFile = fopen("trace2.txt", "r");
-		break;
-	}
-	default:
-	{
-		printf("Wrong input, the program will shut down!\n\n");
-		exit(0);
-	}
-	}
-	FILE* traceFile = fopen("trace1.txt", "r");
-	pipe.forward = argv[1];
-	pipe.branch = argv[2];
-	nextCycle(traceFile, &pipe);
-	printCPI();
-	fclose(traceFile);
+    Pipeline pipe;
+    const char *path;
+    char choice[16];
+    if (argc < 3 || argc > 4 ||
+        (strcmp(argv[1], "0") && strcmp(argv[1], "1")) ||
+        (strcmp(argv[2], "0") && strcmp(argv[2], "1"))) {
+        fprintf(stderr, "Usage: %s <forward: 0|1> <branch: 0|1> [trace-file]\n", argv[0]);
+        return EXIT_FAILURE;
+    }
+    if (argc == 4) path = argv[3];
+    else {
+        printf("Enter 1 for trace1.txt, 2 for trace2.txt\n");
+        if (!fgets(choice, sizeof choice, stdin) || (choice[0] != '1' && choice[0] != '2') || (choice[1] != '\n' && choice[1] != '\0')) {
+            fprintf(stderr, "Invalid trace selection.\n");
+            return EXIT_FAILURE;
+        }
+        path = choice[0] == '1' ? "trace1.txt" : "trace2.txt";
+    }
+    FILE *traceFile = fopen(path, "r");
+    if (!traceFile) { perror(path); return EXIT_FAILURE; }
+    initPipe(&pipe);
+    pipe.forward = argv[1][0] - '0';
+    pipe.branch = argv[2][0] - '0';
+    nextCycle(traceFile, &pipe);
+    fclose(traceFile);
+    if (parseError) return EXIT_FAILURE;
+    printCPI();
+    return EXIT_SUCCESS;
 }
 
 /*Pipeline functions*/
 void nextCycle(FILE* traceFile, Pipeline* pipe)
 {
-	int i, stl;
+	int i, draining = 0;
 	Command newCommand;
-	Command tmp;
 	while (1)
 	{
-		stl = 0;
-		newCommand = readCommand(traceFile);
-		if (!(strcmp(newCommand.name, "END OF FILE")))	//exit condition
-		{
-			endFile(pipe);
-			return;
-		}
+        if (!draining) {
+            newCommand = readCommand(traceFile);
+            if (newCommand.type == 'E') draining = 1;
+        }
+        if (draining) { newCommand = addBubble(); strcpy(newCommand.command, "No Command"); }
+
 		for (i = 4; i > 0; i--)
 		{
 			pipe->stage[i] = pipe->stage[i - 1];
@@ -146,14 +144,14 @@ void nextCycle(FILE* traceFile, Pipeline* pipe)
 			}
 			if (pipe->branch == 0)	/*Branch in MEM stage*/
 			{
-				if ((pipe->stage[ID].signals.Branch) && pipe->stage[IF].address != pipe->stage[ID].address + 4)
+				if ((pipe->stage[ID].signals.Branch) && pipe->stage[IF].type != '0' && pipe->stage[IF].address != pipe->stage[ID].address + 4)
 				{
 					flush1(pipe);
 				}
 			}
 			else
 			{
-				if ((pipe->stage[ID].signals.Branch) && pipe->stage[IF].address != pipe->stage[ID].address + 4)
+				if ((pipe->stage[ID].signals.Branch) && pipe->stage[IF].type != '0' && pipe->stage[IF].address != pipe->stage[ID].address + 4)
 				{
 					stall(pipe, ID);
 					cycle++;
@@ -171,14 +169,14 @@ void nextCycle(FILE* traceFile, Pipeline* pipe)
 			}
 			if (pipe->branch == 0)	/*Branch in MEM stage*/
 			{
-				if ((pipe->stage[ID].signals.Branch) && pipe->stage[IF].address != pipe->stage[ID].address + 4)
+				if ((pipe->stage[ID].signals.Branch) && pipe->stage[IF].type != '0' && pipe->stage[IF].address != pipe->stage[ID].address + 4)
 				{
 					flush1(pipe);
 				}
 			}
 			else         /*Branch in MEM stage*/
 			{
-				if ((pipe->stage[ID].signals.Branch) && pipe->stage[IF].address != pipe->stage[ID].address + 4)
+				if ((pipe->stage[ID].signals.Branch) && pipe->stage[IF].type != '0' && pipe->stage[IF].address != pipe->stage[ID].address + 4)
 				{
 					stall(pipe, ID);
 					cycle++;
@@ -186,6 +184,8 @@ void nextCycle(FILE* traceFile, Pipeline* pipe)
 				}
 			}
 		}
+        if (draining && pipe->stage[IF].type == '0' && pipe->stage[ID].type == '0' &&
+            pipe->stage[EX].type == '0' && pipe->stage[MEM].type == '0') return;
 	}
 }
 
@@ -250,8 +250,7 @@ void bStall(Pipeline* pipe)	//pipe[location] will be stalled
 
 Command addBubble()	//returns a bubble/stall
 {
-	int i;
-	Command bubble;
+	Command bubble = {0};
 	bubble.type = '0';
 	strcpy(bubble.name, "stll");
 	strcpy(bubble.command, "stall");
@@ -301,6 +300,7 @@ char getCommandType(char* commandName)
 			}
 		} while (commandName[t]);
 	}
+	return '?';
 }
 
 int convertToBinary(int origin)
@@ -331,8 +331,8 @@ long toBin(int dno)
 
 void printCPI()
 {
-	float CPI = cycle / (cycle - stalls - 4);
-	printf("CPI: %f\n", CPI);
+	if (instructions == 0) { printf("No instructions.\n"); return; }
+	printf("Instructions: %d\nCycles: %d\nCPI: %.3f\n", instructions, (int)cycle, cycle / instructions);
 }
 
 void printfCycleInfo(Pipeline pipe)
@@ -356,8 +356,8 @@ void endFile(Pipeline* pipe)
 			pipe->stage[j] = pipe->stage[j - 1];
 		}
 		pipe->stage[0] = addBubble();
-		strcpy(&pipe->stage[j].name, "Empty");
-		strcpy(&pipe->stage[j].command, "No Command");
+		strcpy(pipe->stage[j].name, "nop");
+		strcpy(pipe->stage[j].command, "No Command");
 		cycle++;
 		printfCycleInfo(*pipe);
 	}
@@ -366,119 +366,64 @@ void endFile(Pipeline* pipe)
 /*File functions*/
 Command readCommand(FILE* filePtr)
 {
-	int i = 0, init = ftell(filePtr), tmp;
-	Command newCommand;
-	char ch;
-	fscanf(filePtr, "%d", &newCommand.address);		//check where is the pointer - if ' ' or after
-	fseek(filePtr, 1, SEEK_CUR);					//if in space
-	do {
-		ch = fgetc(filePtr);
-		if (ch != ' ' && ch != '$')
-			newCommand.name[i++] = ch;
-	} while (ch != '$' && ch != EOF);
-	newCommand.name[i] = '\0';
-	newCommand.type = getCommandType(newCommand.name);
-	switch (newCommand.type)
-	{
-	case 'R':	//R type
-	{
-		newCommand.signals = rControl;
-		//fseek(filePtr, 1, SEEK_CUR);
-		fscanf(filePtr, "%d", &tmp);
-		newCommand.operand1 = convertToBinary(tmp);
-		fseek(filePtr, 2, SEEK_CUR);
-		fscanf(filePtr, "%d", &tmp);
-		newCommand.operand2 = convertToBinary(tmp);
-		fseek(filePtr, 2, SEEK_CUR);
-		fscanf(filePtr, "%d", &tmp);
-		newCommand.operand3 = convertToBinary(tmp);
-		break;
-	}
-
-	case 'I':	//i alu type
-	{
-		newCommand.signals = iControl;
-		//fseek(filePtr, 2, SEEK_CUR);
-		fscanf(filePtr, "%d", &tmp);
-		newCommand.operand1 = convertToBinary(tmp);
-		fseek(filePtr, 2, SEEK_CUR);
-		fscanf(filePtr, "%d", &tmp);
-		newCommand.operand2 = convertToBinary(tmp);
-		fseek(filePtr, 1, SEEK_CUR);
-		fscanf(filePtr, "%d", &tmp);
-		newCommand.operand3 = convertToBinary(tmp);
-		break;
-	}
-
-	case 'L':	//lw type
-	{
-		newCommand.signals = lControl;
-		//fseek(filePtr, 2, SEEK_CUR);
-		fscanf(filePtr, "%d", &tmp);
-		newCommand.operand1 = convertToBinary(tmp);
-		fseek(filePtr, 1, SEEK_CUR);
-		fscanf(filePtr, "%d", &tmp);
-		newCommand.operand2 = convertToBinary(tmp);
-		fseek(filePtr, 2, SEEK_CUR);
-		fscanf(filePtr, "%d", &tmp);
-		newCommand.operand3 = convertToBinary(tmp);
-		break;
-	}
-
-	case 'S':	//sw type
-	{
-		newCommand.signals = sControl;
-		//fseek(filePtr, 2, SEEK_CUR);
-		fscanf(filePtr, "%d", &tmp);
-		newCommand.operand2 = convertToBinary(tmp);
-		fseek(filePtr, 1, SEEK_CUR);
-		fscanf(filePtr, "%d", &tmp);
-		newCommand.operand3 = convertToBinary(tmp);
-		fseek(filePtr, 2, SEEK_CUR);
-		fscanf(filePtr, "%d", &tmp);
-		newCommand.operand1 = convertToBinary(tmp);
-		break;
-	}
-
-	case 'B':	//branch type
-	{
-		newCommand.signals = bControl;
-		fscanf(filePtr, "%d", &tmp);
-		newCommand.operand1 = convertToBinary(tmp);
-		fseek(filePtr, 1, SEEK_CUR);
-		fscanf(filePtr, "%d", &tmp);
-		newCommand.operand2 = convertToBinary(tmp);
-		fseek(filePtr, 2, SEEK_CUR);
-		fscanf(filePtr, "%s", &tmp);
-		break;
-	}
-
-	/*case 'J':	//jump type
-	{
-		newCommand.signals = jControl;
-
-	}*/
-	}
-
-
-	fseek(filePtr, init + 5, SEEK_SET);
-	i = 0;
-	while (ch != '\n' && ch != EOF)
-	{
-		ch = fgetc(filePtr);
-		if (ch != '\n' && ch != EOF)
-			newCommand.command[i++] = ch;		//check if need ='\0' and if last char is '\n' or new line already
-	}
-	newCommand.command[i] = '\0';
-	if (ch == EOF) return endOfFile();
-	return newCommand;
+    char line[256], mnemonic[16], extra[32];
+    int address, r1, r2, value, matched;
+    Command cmd = {0};
+    do {
+        if (!fgets(line, sizeof line, filePtr)) return endOfFile();
+    } while (strspn(line, " \t\r\n") == strlen(line));
+    if (!strchr(line, '\n') && !feof(filePtr)) {
+        fprintf(stderr, "Trace line too long.\n"); parseError = 1; return endOfFile();
+    }
+    if (sscanf(line, "%d %15s", &address, mnemonic) != 2) {
+        fprintf(stderr, "Invalid trace line: %s", line); parseError = 1; return endOfFile();
+    }
+    cmd.type = getCommandType(mnemonic);
+    cmd.address = address;
+    if (strlen(mnemonic) >= sizeof cmd.name) { parseError = 1; return endOfFile(); }
+    strcpy(cmd.name, mnemonic);
+    switch (cmd.type) {
+    case 'R':
+        matched = sscanf(line, "%*d %*s $%d $%d $%d %31s", &r1, &r2, &value, extra);
+        if (matched != 3) break;
+        cmd.signals = rControl; cmd.operand1 = r1; cmd.operand2 = r2; cmd.operand3 = value; goto valid;
+    case 'I':
+        matched = sscanf(line, "%*d %*s $%d $%d %d %31s", &r1, &r2, &value, extra);
+        if (matched != 3) break;
+        cmd.signals = iControl; cmd.operand1 = r1; cmd.operand2 = r2; cmd.operand3 = -1; goto valid;
+    case 'L': case 'S':
+        matched = sscanf(line, "%*d %*s $%d %d $%d %31s", &r1, &value, &r2, extra);
+        if (matched != 3) break;
+        cmd.signals = cmd.type == 'L' ? lControl : sControl;
+        cmd.operand1 = cmd.type == 'L' ? r1 : -1;
+        cmd.operand2 = r2; cmd.operand3 = cmd.type == 'S' ? r1 : -1; goto valid;
+    case 'B':
+        matched = sscanf(line, "%*d %*s $%d $%d %31s", &r1, &r2, extra);
+        if (matched != 3) break;
+        cmd.signals = bControl; cmd.operand1 = -1; cmd.operand2 = r1; cmd.operand3 = r2; goto valid;
+    default: break;
+    }
+    fprintf(stderr, "Unsupported or invalid instruction: %s", line);
+    parseError = 1; return endOfFile();
+valid:
+    if (r1 < 0 || r1 > 31 || r2 < 0 || r2 > 31 || (cmd.type == 'R' && (value < 0 || value > 31))) {
+        fprintf(stderr, "Invalid register in: %s", line); parseError = 1; return endOfFile();
+    }
+    char *text = strchr(line, ' ');
+    if (!text) { parseError = 1; return endOfFile(); }
+    while (*text == ' ') text++;
+    text[strcspn(text, "\r\n")] = '\0';
+    if (strlen(text) >= sizeof cmd.command) { fprintf(stderr, "Instruction too long.\n"); parseError = 1; return endOfFile(); }
+    strcpy(cmd.command, text);
+    instructions++;
+    return cmd;
 }
 
 Command endOfFile()
 {
-	Command end = addBubble();
-	strcpy(&end.name, "END OF FILE");
-	return end;
+    Command end = addBubble();
+    end.type = 'E';
+    return end;
 }
 
 void initPipe(Pipeline* pipe)
@@ -487,7 +432,7 @@ void initPipe(Pipeline* pipe)
 	for (; i < 5; i++)
 	{
 		pipe->stage[i] = addBubble();
-		strcpy(&pipe->stage[i].name, "Empty");
-		strcpy(&pipe->stage[i].command, "No Command");
+		strcpy(pipe->stage[i].name, "nop");
+		strcpy(pipe->stage[i].command, "No Command");
 	}
 }
